@@ -1,302 +1,273 @@
 """
-Dataset generators for testing Condition-Aware FNO
+Dataset generators for testing Condition-Aware FNO.
 
 Includes multiple PDE datasets:
 - Poisson equation
-- Darcy flow
-- Burgers' equation (1D -> 2D)
+- Darcy-like flow
+- Heat equation
+- Wave equation
 """
 
-import torch
-import numpy as np
-from torch.utils.data import Dataset
 from typing import Tuple
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
 
 
 class BasePDEDataset(Dataset):
-    """Base class for PDE datasets"""
-    
-    def __init__(self, n_samples=1000, grid_size=64, seed=42):
+    def __init__(self, n_samples: int = 1000, grid_size: int = 64, seed: int = 42):
         self.n_samples = n_samples
         self.grid_size = grid_size
         self.seed = seed
-        
-        # Generate all data upfront for reproducibility
-        # This ensures the same data is returned regardless of access order
-        self._generate_all_data()
-    
-    def _generate_all_data(self):
-        """Generate all data samples upfront - override in subclasses"""
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
-        
         self.data = []
-        for idx in range(self.n_samples):
-            # Use idx as part of seed to ensure each sample is deterministic
-            sample_seed = self.seed + idx * 1000
-            np.random.seed(sample_seed)
-            torch.manual_seed(sample_seed)
-            
-            a = self._generate_random_field(self.grid_size)
-            u = self._solve_pde(a)
-            self.data.append((torch.FloatTensor(a), torch.FloatTensor(u)))
-    
-    def _solve_pde(self, a):
-        """Override in subclasses to implement specific PDE solver"""
-        raise NotImplementedError("Subclasses must implement _solve_pde")
-    
-    def _generate_random_field(self, size, power_decay=1.0):
-        """Generate smooth random field using Gaussian process"""
-        # Create frequency domain
-        kx = np.fft.fftfreq(size)
-        ky = np.fft.fftfreq(size)
-        KX, KY = np.meshgrid(kx, ky)
-        K = np.sqrt(KX**2 + KY**2)
-        
-        # Power spectrum (decay with frequency)
-        power = 1.0 / (1.0 + K**power_decay)
-        power[0, 0] = 0  # Remove DC component
-        
-        # Generate random field
-        phase = np.random.randn(size, size) + 1j * np.random.randn(size, size)
-        a_fft = np.sqrt(power) * phase
-        a = np.real(np.fft.ifft2(a_fft))
-        
-        # Normalize
-        a = (a - a.mean()) / (a.std() + 1e-8)
-        return a
+        self._generate_all_data()
+
+    def __len__(self) -> int:
+        return self.n_samples
+
+    def __getitem__(self, idx: int):
+        return self.data[idx]
+
+    def _set_sample_seed(self, idx: int) -> None:
+        s = self.seed + idx
+        np.random.seed(s)
+        torch.manual_seed(s)
+
+    def _generate_sample(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    def _generate_all_data(self) -> None:
+        self.data = []
+        for i in range(self.n_samples):
+            self._set_sample_seed(i)
+            a, u = self._generate_sample(i)
+            self.data.append((a, u))
 
 
 class PoissonDataset(BasePDEDataset):
-    """Generate synthetic data for Poisson equation: -Δu = a"""
-    
-    def __len__(self):
-        return self.n_samples
-    
-    def __getitem__(self, idx):
-        return self.data[idx]
-    
-    def _solve_pde(self, a):
-        """Solve -Δu = a in Fourier space"""
+    """
+    Synthetic Poisson dataset solving -Δu = a on a periodic square domain.
+    """
+
+    def __init__(self, n_samples: int = 1000, grid_size: int = 64, seed: int = 42):
+        super().__init__(n_samples=n_samples, grid_size=grid_size, seed=seed)
+
+    def _generate_random_field(self, size: int) -> np.ndarray:
+        kx = np.fft.fftfreq(size)
+        ky = np.fft.fftfreq(size)
+        KX, KY = np.meshgrid(kx, ky)
+        K2 = KX ** 2 + KY ** 2
+
+        power = 1.0 / (1.0 + K2)
+        power[0, 0] = 0.0
+
+        phase = np.random.randn(size, size) + 1j * np.random.randn(size, size)
+        field_fft = np.sqrt(power) * phase
+        field = np.real(np.fft.ifft2(field_fft))
+
+        field = (field - field.mean()) / (field.std() + 1e-8)
+        return field
+
+    def _solve_poisson(self, a: np.ndarray) -> np.ndarray:
         a_fft = np.fft.fft2(a)
         kx = np.fft.fftfreq(a.shape[0])
         ky = np.fft.fftfreq(a.shape[1])
         KX, KY = np.meshgrid(kx, ky)
-        K2 = KX**2 + KY**2
-        K2[0, 0] = 1  # Avoid division by zero
-        
+        K2 = KX ** 2 + KY ** 2
+        K2[0, 0] = 1.0
         u_fft = a_fft / K2
         u = np.real(np.fft.ifft2(u_fft))
         return u
 
+    def _generate_sample(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        a = self._generate_random_field(self.grid_size)
+        u = self._solve_poisson(a)
+        a_t = torch.from_numpy(a).float()
+        u_t = torch.from_numpy(u).float()
+        return a_t, u_t
+
 
 class DarcyDataset(BasePDEDataset):
     """
-    Generate synthetic data for Darcy flow equation:
-    -∇·(a(x,y)∇u) = f
-    
-    Simplified version: solve for u given permeability field a
+    Simplified Darcy-like dataset.
+
+    We generate a random log-permeability field a(x, y) and construct a target
+    u(x, y) by solving a Poisson problem with a forcing derived from a.
     """
-    
-    def __init__(self, n_samples=1000, grid_size=64, seed=42, permeability_range=(0.1, 10.0)):
-        super().__init__(n_samples, grid_size, seed)
-        self.permeability_range = permeability_range
-    
-    def __len__(self):
-        return self.n_samples
-    
-    def __getitem__(self, idx):
-        return self.data[idx]
-    
-    def _generate_all_data(self):
-        """Generate all data samples upfront"""
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
-        
-        self.data = []
-        for idx in range(self.n_samples):
-            sample_seed = self.seed + idx * 1000
-            np.random.seed(sample_seed)
-            torch.manual_seed(sample_seed)
-            
-            # Generate permeability field a(x,y)
-            a_log = self._generate_random_field(self.grid_size, power_decay=2.0)
-            # Map to permeability range
-            a_min, a_max = self.permeability_range
-            a = np.exp(a_log * np.log(a_max / a_min) / 2 + np.log((a_min * a_max) ** 0.5))
-            
-            # Generate source term f
-            f = self._generate_random_field(self.grid_size, power_decay=1.5)
-            f = (f - f.min()) / (f.max() - f.min() + 1e-8) * 2 - 1  # Normalize to [-1, 1]
-            
-            # Solve Darcy equation: -∇·(a∇u) = f
-            u = self._solve_pde(a, f)
-            
-            self.data.append((torch.FloatTensor(a), torch.FloatTensor(u)))
-    
-    def _solve_pde(self, a, f):
-        """Solve -∇·(a∇u) = f using iterative method"""
-        # Simplified: use Fourier method with constant coefficient approximation
-        # More accurate would use finite difference, but this is faster for synthetic data
-        dx = 1.0 / self.grid_size
-        
-        # Use a simplified approach: solve in Fourier space with averaged coefficient
-        a_avg = a.mean()
-        f_fft = np.fft.fft2(f)
-        kx = np.fft.fftfreq(self.grid_size)
-        ky = np.fft.fftfreq(self.grid_size)
+
+    def __init__(
+        self,
+        n_samples: int = 1000,
+        grid_size: int = 64,
+        seed: int = 42,
+        log_amplitude: float = 0.5,
+    ):
+        self.log_amplitude = log_amplitude
+        super().__init__(n_samples=n_samples, grid_size=grid_size, seed=seed)
+
+    def _generate_log_perm(self, size: int) -> np.ndarray:
+        kx = np.fft.fftfreq(size)
+        ky = np.fft.fftfreq(size)
         KX, KY = np.meshgrid(kx, ky)
-        K2 = KX**2 + KY**2
-        K2[0, 0] = 1
-        
-        # Approximate solution
-        u_fft = f_fft / (a_avg * K2 + 1e-6)
+        K2 = KX ** 2 + KY ** 2
+        power = 1.0 / (1.0 + K2)
+        power[0, 0] = 0.0
+        phase = np.random.randn(size, size) + 1j * np.random.randn(size, size)
+        field_fft = np.sqrt(power) * phase
+        base = np.real(np.fft.ifft2(field_fft))
+        base = (base - base.mean()) / (base.std() + 1e-8)
+        log_k = self.log_amplitude * base
+        return log_k
+
+    def _solve_poisson(self, f: np.ndarray) -> np.ndarray:
+        f_fft = np.fft.fft2(f)
+        kx = np.fft.fftfreq(f.shape[0])
+        ky = np.fft.fftfreq(f.shape[1])
+        KX, KY = np.meshgrid(kx, ky)
+        K2 = KX ** 2 + KY ** 2
+        K2[0, 0] = 1.0
+        u_fft = f_fft / K2
         u = np.real(np.fft.ifft2(u_fft))
-        
-        # Add correction for spatially varying coefficient (simplified)
-        # This is a heuristic to make the problem more interesting
-        u = u * (1 + 0.1 * (a - a.mean()) / (a.std() + 1e-8))
-        
         return u
+
+    def _laplacian(self, a: np.ndarray) -> np.ndarray:
+        kx = np.fft.fftfreq(a.shape[0])
+        ky = np.fft.fftfreq(a.shape[1])
+        KX, KY = np.meshgrid(kx, ky)
+        K2 = KX ** 2 + KY ** 2
+        a_fft = np.fft.fft2(a)
+        lap_fft = -K2 * a_fft
+        lap = np.real(np.fft.ifft2(lap_fft))
+        return lap
+
+    def _generate_sample(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        log_k = self._generate_log_perm(self.grid_size)
+        a = np.exp(log_k)
+        lap_a = self._laplacian(a)
+        u = self._solve_poisson(lap_a)
+
+        a_t = torch.from_numpy(a).float()
+        u_t = torch.from_numpy(u).float()
+        return a_t, u_t
 
 
 class HeatEquationDataset(BasePDEDataset):
     """
-    Generate synthetic data for heat equation with variable diffusivity:
-    ∂u/∂t = ∇·(a(x,y)∇u)
-    
-    We solve the steady-state version: ∇·(a∇u) = 0 with boundary conditions
+    Heat equation dataset: u_t = ν Δu, with periodic boundary conditions.
+
+    Input a(x, y) is the initial condition u(x, y, 0).
+    Output u(x, y) is the solution at time T.
     """
-    
-    def __init__(self, n_samples=1000, grid_size=64, seed=42):
-        super().__init__(n_samples, grid_size, seed)
-    
-    def __len__(self):
-        return self.n_samples
-    
-    def __getitem__(self, idx):
-        return self.data[idx]
-    
-    def _generate_all_data(self):
-        """Generate all data samples upfront"""
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
-        
-        self.data = []
-        for idx in range(self.n_samples):
-            sample_seed = self.seed + idx * 1000
-            np.random.seed(sample_seed)
-            torch.manual_seed(sample_seed)
-            
-            # Generate diffusivity field a(x,y)
-            a_log = self._generate_random_field(self.grid_size, power_decay=2.5)
-            a = np.exp(a_log)  # Ensure positive
-            a = a / a.max() * 5.0 + 0.1  # Scale to [0.1, 5.1]
-            
-            # Solve heat equation with boundary conditions
-            # Simplified: use source term approach
-            f = self._generate_random_field(self.grid_size, power_decay=1.0)
-            
-            u = self._solve_pde(a, f)
-            
-            self.data.append((torch.FloatTensor(a), torch.FloatTensor(u)))
-    
-    def _solve_pde(self, a, f):
-        """Solve steady-state heat equation with source"""
-        # Simplified Fourier-based solution
-        a_fft = np.fft.fft2(a)
-        f_fft = np.fft.fft2(f)
-        
-        kx = np.fft.fftfreq(self.grid_size)
-        ky = np.fft.fftfreq(self.grid_size)
+
+    def __init__(
+        self,
+        n_samples: int = 1000,
+        grid_size: int = 64,
+        seed: int = 42,
+        diffusivity: float = 0.01,
+        final_time: float = 1.0,
+    ):
+        self.diffusivity = diffusivity
+        self.final_time = final_time
+        super().__init__(n_samples=n_samples, grid_size=grid_size, seed=seed)
+
+    def _generate_initial_condition(self, size: int) -> np.ndarray:
+        kx = np.fft.fftfreq(size)
+        ky = np.fft.fftfreq(size)
         KX, KY = np.meshgrid(kx, ky)
-        K2 = KX**2 + KY**2
-        K2[0, 0] = 1
-        
-        # Approximate: use average diffusivity
-        a_avg = a.mean()
-        u_fft = f_fft / (a_avg * K2 + 1e-6)
-        u = np.real(np.fft.ifft2(u_fft))
-        
-        return u
+        K2 = KX ** 2 + KY ** 2
+        power = 1.0 / (1.0 + K2)
+        power[0, 0] = 0.0
+        phase = np.random.randn(size, size) + 1j * np.random.randn(size, size)
+        field_fft = np.sqrt(power) * phase
+        field = np.real(np.fft.ifft2(field_fft))
+        field = (field - field.mean()) / (field.std() + 1e-8)
+        return field
+
+    def _solve_heat(self, u0: np.ndarray) -> np.ndarray:
+        kx = np.fft.fftfreq(u0.shape[0])
+        ky = np.fft.fftfreq(u0.shape[1])
+        KX, KY = np.meshgrid(kx, ky)
+        K2 = KX ** 2 + KY ** 2
+        u0_fft = np.fft.fft2(u0)
+        propagator = np.exp(-4.0 * (np.pi ** 2) * self.diffusivity * K2 * self.final_time)
+        uT_fft = u0_fft * propagator
+        uT = np.real(np.fft.ifft2(uT_fft))
+        return uT
+
+    def _generate_sample(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        a = self._generate_initial_condition(self.grid_size)
+        u = self._solve_heat(a)
+        a_t = torch.from_numpy(a).float()
+        u_t = torch.from_numpy(u).float()
+        return a_t, u_t
 
 
 class WaveEquationDataset(BasePDEDataset):
     """
-    Generate synthetic data for wave equation with variable speed:
-    ∂²u/∂t² = c²(x,y)∇²u
-    
-    Steady-state version or time-harmonic solution
+    Wave equation dataset: u_tt = c^2 Δu, with initial velocity 0.
+
+    Input a(x, y) is the initial displacement u(x, y, 0).
+    Output u(x, y) is the displacement at time T.
     """
-    
-    def __init__(self, n_samples=1000, grid_size=64, seed=42, frequency=2.0):
-        super().__init__(n_samples, grid_size, seed)
-        self.frequency = frequency
-    
-    def __len__(self):
-        return self.n_samples
-    
-    def __getitem__(self, idx):
-        return self.data[idx]
-    
-    def _generate_all_data(self):
-        """Generate all data samples upfront"""
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
-        
-        self.data = []
-        for idx in range(self.n_samples):
-            sample_seed = self.seed + idx * 1000
-            np.random.seed(sample_seed)
-            torch.manual_seed(sample_seed)
-            
-            # Generate wave speed field c(x,y)
-            c = self._generate_random_field(self.grid_size, power_decay=2.0)
-            c = np.exp(c)  # Ensure positive
-            c = c / c.max() * 3.0 + 0.5  # Scale to [0.5, 3.5]
-            
-            # Generate source
-            f = self._generate_random_field(self.grid_size, power_decay=1.5)
-            
-            # Solve wave equation (Helmholtz equation)
-            u = self._solve_pde(c, f)
-            
-            self.data.append((torch.FloatTensor(c), torch.FloatTensor(u)))
-    
-    def _solve_pde(self, c, f):
-        """Solve Helmholtz equation: -∇²u - (ω/c)²u = f"""
-        omega = 2 * np.pi * self.frequency
-        c_avg = c.mean()
-        
-        f_fft = np.fft.fft2(f)
-        kx = np.fft.fftfreq(self.grid_size)
-        ky = np.fft.fftfreq(self.grid_size)
+
+    def __init__(
+        self,
+        n_samples: int = 1000,
+        grid_size: int = 64,
+        seed: int = 42,
+        wave_speed: float = 1.0,
+        final_time: float = 1.0,
+    ):
+        self.wave_speed = wave_speed
+        self.final_time = final_time
+        super().__init__(n_samples=n_samples, grid_size=grid_size, seed=seed)
+
+    def _generate_initial_displacement(self, size: int) -> np.ndarray:
+        kx = np.fft.fftfreq(size)
+        ky = np.fft.fftfreq(size)
         KX, KY = np.meshgrid(kx, ky)
-        K2 = KX**2 + KY**2
-        K2[0, 0] = 1
-        
-        # Helmholtz operator in Fourier space
-        helmholtz = K2 - (omega / c_avg) ** 2
-        helmholtz[0, 0] = 1
-        
-        u_fft = -f_fft / (helmholtz + 1e-6)
-        u = np.real(np.fft.ifft2(u_fft))
-        
-        return u
+        K2 = KX ** 2 + KY ** 2
+        power = 1.0 / (1.0 + K2)
+        power[0, 0] = 0.0
+        phase = np.random.randn(size, size) + 1j * np.random.randn(size, size)
+        field_fft = np.sqrt(power) * phase
+        field = np.real(np.fft.ifft2(field_fft))
+        field = (field - field.mean()) / (field.std() + 1e-8)
+        return field
+
+    def _solve_wave(self, u0: np.ndarray) -> np.ndarray:
+        kx = np.fft.fftfreq(u0.shape[0])
+        ky = np.fft.fftfreq(u0.shape[1])
+        KX, KY = np.meshgrid(kx, ky)
+        K = np.sqrt(KX ** 2 + KY ** 2)
+
+        u0_fft = np.fft.fft2(u0)
+        omega = 2.0 * np.pi * self.wave_speed * K
+        cos_term = np.cos(omega * self.final_time)
+        uT_fft = u0_fft * cos_term
+        uT = np.real(np.fft.ifft2(uT_fft))
+        return uT
+
+    def _generate_sample(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        a = self._generate_initial_displacement(self.grid_size)
+        u = self._solve_wave(a)
+        a_t = torch.from_numpy(a).float()
+        u_t = torch.from_numpy(u).float()
+        return a_t, u_t
 
 
-# Dataset registry for easy access
 DATASET_REGISTRY = {
-    'poisson': PoissonDataset,
-    'darcy': DarcyDataset,
-    'heat': HeatEquationDataset,
-    'wave': WaveEquationDataset,
+    "poisson": PoissonDataset,
+    "darcy": DarcyDataset,
+    "heat": HeatEquationDataset,
+    "wave": WaveEquationDataset,
 }
 
 
 def get_dataset(name: str, **kwargs) -> Dataset:
-    """Get a dataset by name"""
-    if name.lower() not in DATASET_REGISTRY:
+    name = name.lower()
+    if name not in DATASET_REGISTRY:
         raise ValueError(f"Unknown dataset: {name}. Available: {list(DATASET_REGISTRY.keys())}")
-    return DATASET_REGISTRY[name.lower()](**kwargs)
-
+    return DATASET_REGISTRY[name](**kwargs)
