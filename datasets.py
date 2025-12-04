@@ -100,8 +100,8 @@ class DarcyDataset(BasePDEDataset):
     """
     
     def __init__(self, n_samples=1000, grid_size=64, seed=42, permeability_range=(0.1, 10.0)):
-        super().__init__(n_samples, grid_size, seed)
         self.permeability_range = permeability_range
+        super().__init__(n_samples, grid_size, seed)
     
     def __len__(self):
         return self.n_samples
@@ -231,8 +231,8 @@ class WaveEquationDataset(BasePDEDataset):
     """
     
     def __init__(self, n_samples=1000, grid_size=64, seed=42, frequency=2.0):
-        super().__init__(n_samples, grid_size, seed)
         self.frequency = frequency
+        super().__init__(n_samples, grid_size, seed)
     
     def __len__(self):
         return self.n_samples
