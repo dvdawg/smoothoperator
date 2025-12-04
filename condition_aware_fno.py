@@ -382,7 +382,12 @@ def main():
     np.random.seed(42)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
     print(f"Using device: {device}")
+    if torch.cuda.is_available():
+        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
     grid_size = 64
     modes = 12
@@ -396,8 +401,14 @@ def main():
     train_dataset = PoissonDataset(n_samples=n_train, grid_size=grid_size, seed=42)
     test_dataset = PoissonDataset(n_samples=n_test, grid_size=grid_size, seed=43)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    # Use pin_memory for faster CUDA transfers
+    pin_memory = torch.cuda.is_available()
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, pin_memory=pin_memory
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory
+    )
 
     a_all = []
     u_all = []
