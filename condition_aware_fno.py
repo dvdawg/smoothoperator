@@ -13,56 +13,120 @@ def compute_adaptive_mask(
     lambda_reg: float = 1e-6,
     energy_fraction: float = 0.95,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    del a_batch
-
+    """
+    Computes the adaptive spectral mask using the Condition-Aware criterion:
+    Score(k) = Energy(k) / ConditionNumber(k).
+    
+    Modes are selected by sorting Score(k) descending and retaining the top set 
+    that captures 'energy_fraction' of the total energy.
+    """
     device = u_batch.device
-    B, H, W = u_batch.shape
+    
+    # Ensure inputs are 4D: (Batch, Channels, Height, Width)
+    # If inputs are (Batch, H, W), unsqueeze channel dim.
+    if a_batch.dim() == 3:
+        a_batch_in = a_batch.unsqueeze(1)
+    else:
+        a_batch_in = a_batch
 
-    u_fft = torch.fft.rfft2(u_batch)
-    _, H_fft, W_fft = u_fft.shape
+    if u_batch.dim() == 3:
+        u_batch_in = u_batch.unsqueeze(1)
+    else:
+        u_batch_in = u_batch
+
+    # Compute FFTs
+    # Shapes: (B, C, H, W_half)
+    a_fft = torch.fft.rfft2(a_batch_in)
+    u_fft = torch.fft.rfft2(u_batch_in)
+    
+    _, _, H_fft, W_fft = a_fft.shape
     m2_eff = min(modes2, W_fft)
 
-    def compute_energy(i_start: int, i_end: int) -> torch.Tensor:
+    def compute_metrics(i_start: int, i_end: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Computes both Energy and Condition-Aware Score for a block of modes.
+        Returns: (scores, energies)
+        """
         m1 = max(i_end - i_start, 0)
-        energy = torch.zeros((m1, modes2), device=device)
+        scores = torch.zeros((m1, modes2), device=device)
+        energies = torch.zeros((m1, modes2), device=device)
+        
         for i_abs in range(i_start, i_end):
             i_rel = i_abs - i_start
             for j in range(m2_eff):
-                Y = u_fft[:, i_abs, j]
-                e = torch.sum(torch.abs(Y) ** 2).real
-                energy[i_rel, j] = e
-        return energy
+                # Extract input (X) and output (Y) vectors for this mode across batch
+                # X_k shape: (Batch, In_Channels)
+                # Y_k shape: (Batch, Out_Channels)
+                X_k = a_fft[:, :, i_abs, j]
+                Y_k = u_fft[:, :, i_abs, j]
+                
+                # 1. Compute Energy (Squared Frobenius Norm of Output)
+                energy = torch.sum(torch.abs(Y_k) ** 2).real
+                energies[i_rel, j] = energy
+                
+                # 2. Compute Condition Number of Input (X_k)
+                # kappa = sigma_max / sigma_min
+                # If In_Channels == 1, singular value is just the vector norm, so kappa=1.
+                if X_k.shape[1] > 1:
+                    try:
+                        # Compute singular values (S is sorted desc)
+                        s = torch.linalg.svdvals(X_k)
+                        if s.numel() > 0 and s[-1] > 1e-9:
+                            cond = s[0] / s[-1]
+                        else:
+                            cond = 1e9  # Ill-conditioned or zero signal
+                    except:
+                        cond = 1e9
+                else:
+                    # Scalar input case: Condition number is effectively 1 
+                    # (unless signal is 0, which we penalize)
+                    if torch.norm(X_k) < 1e-9:
+                        cond = 1e9
+                    else:
+                        cond = 1.0
 
-    def select_mask(scores: torch.Tensor) -> torch.Tensor:
-        flat = scores.reshape(-1)
-        total = flat.sum()
-        if total <= 0:
+                # 3. Compute Score = Energy / Condition
+                scores[i_rel, j] = energy / (cond + 1e-8)
+                
+        return scores, energies
+
+    def select_mask(scores: torch.Tensor, energies: torch.Tensor) -> torch.Tensor:
+        flat_scores = scores.reshape(-1)
+        flat_energies = energies.reshape(-1)
+        
+        total_energy = flat_energies.sum()
+        if total_energy <= 0:
             return torch.ones_like(scores, dtype=torch.bool, device=device)
-
-        sorted_vals, sorted_idx = torch.sort(flat, descending=True)
-        cumsum = torch.cumsum(sorted_vals, dim=0)
-        target = energy_fraction * total
-
-        k = int((cumsum <= target).sum().item())
-        if k == 0:
+        sorted_scores, sorted_idx = torch.sort(flat_scores, descending=True)
+        
+        sorted_energies = flat_energies[sorted_idx]
+        cumsum_energy = torch.cumsum(sorted_energies, dim=0)
+        
+        target = energy_fraction * total_energy
+        k = int((cumsum_energy <= target).sum().item())
+        
+        if k == 0 and total_energy > 0:
             k = 1
-        if k > flat.numel():
-            k = flat.numel()
+        if k > flat_scores.numel():
+            k = flat_scores.numel()
 
-        mask_flat = torch.zeros_like(flat, dtype=torch.bool, device=device)
+        mask_flat = torch.zeros_like(flat_scores, dtype=torch.bool, device=device)
         mask_flat[sorted_idx[:k]] = True
+        
         return mask_flat.view_as(scores)
 
     low_start = 0
     low_end = min(modes1, H_fft)
+    
     high_end = H_fft
     high_start = max(high_end - modes1, 0)
 
-    low_scores = compute_energy(low_start, low_end)
-    high_scores = compute_energy(high_start, high_end)
+    low_scores, low_energies = compute_metrics(low_start, low_end)
+    high_scores, high_energies = compute_metrics(high_start, high_end)
 
-    low_mask = select_mask(low_scores)
-    high_mask = select_mask(high_scores)
+    low_mask = select_mask(low_scores, low_energies)
+    high_mask = select_mask(high_scores, high_energies)
+    
     return low_mask, high_mask
 
 
