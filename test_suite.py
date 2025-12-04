@@ -62,9 +62,15 @@ class ExperimentRunner:
         else:
             self.device = torch.device(device)
         
-        # Set random seeds
+        # Set random seeds for reproducibility
         torch.manual_seed(seed)
         np.random.seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            # Enable deterministic CUDA operations (may be slower)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         
         # Results storage
         self.results = {
@@ -106,14 +112,26 @@ class ExperimentRunner:
             seed=self.seed + 1000  # Different seed for test set
         )
         
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        # Create DataLoaders with deterministic shuffling
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=self.batch_size, 
+            shuffle=True,
+            generator=generator
+        )
         test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
         
         # Compute normalization statistics
+        # Collect data in deterministic order (no shuffling for stats)
         print("Computing normalization statistics and adaptive spectral mask...")
         a_batch_list = []
         u_batch_list = []
-        for a, u in train_loader:
+        
+        # Collect all data deterministically (without shuffling for statistics)
+        stats_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False)
+        for a, u in stats_loader:
             a_batch_list.append(a)
             u_batch_list.append(u)
         
@@ -127,7 +145,8 @@ class ExperimentRunner:
         
         u_all_normalized = (u_all - u_mean) / (u_std + 1e-8)
         
-        # Compute adaptive mask
+        # Compute adaptive mask on fixed subset (first n_samples_for_mask samples)
+        # This ensures the same samples are used for mask computation each time
         n_samples_for_mask = min(200, len(a_all))
         a_mask = a_all[:n_samples_for_mask]
         u_mask = u_all_normalized[:n_samples_for_mask]

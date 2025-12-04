@@ -19,8 +19,31 @@ class BasePDEDataset(Dataset):
     def __init__(self, n_samples=1000, grid_size=64, seed=42):
         self.n_samples = n_samples
         self.grid_size = grid_size
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        self.seed = seed
+        
+        # Generate all data upfront for reproducibility
+        # This ensures the same data is returned regardless of access order
+        self._generate_all_data()
+    
+    def _generate_all_data(self):
+        """Generate all data samples upfront - override in subclasses"""
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        
+        self.data = []
+        for idx in range(self.n_samples):
+            # Use idx as part of seed to ensure each sample is deterministic
+            sample_seed = self.seed + idx * 1000
+            np.random.seed(sample_seed)
+            torch.manual_seed(sample_seed)
+            
+            a = self._generate_random_field(self.grid_size)
+            u = self._solve_pde(a)
+            self.data.append((torch.FloatTensor(a), torch.FloatTensor(u)))
+    
+    def _solve_pde(self, a):
+        """Override in subclasses to implement specific PDE solver"""
+        raise NotImplementedError("Subclasses must implement _solve_pde")
     
     def _generate_random_field(self, size, power_decay=1.0):
         """Generate smooth random field using Gaussian process"""
@@ -51,15 +74,9 @@ class PoissonDataset(BasePDEDataset):
         return self.n_samples
     
     def __getitem__(self, idx):
-        # Generate random source term a(x,y)
-        a = self._generate_random_field(self.grid_size)
-        
-        # Solve Poisson equation in Fourier space
-        u = self._solve_poisson(a)
-        
-        return torch.FloatTensor(a), torch.FloatTensor(u)
+        return self.data[idx]
     
-    def _solve_poisson(self, a):
+    def _solve_pde(self, a):
         """Solve -Δu = a in Fourier space"""
         a_fft = np.fft.fft2(a)
         kx = np.fft.fftfreq(a.shape[0])
@@ -89,22 +106,35 @@ class DarcyDataset(BasePDEDataset):
         return self.n_samples
     
     def __getitem__(self, idx):
-        # Generate permeability field a(x,y)
-        a_log = self._generate_random_field(self.grid_size, power_decay=2.0)
-        # Map to permeability range
-        a_min, a_max = self.permeability_range
-        a = np.exp(a_log * np.log(a_max / a_min) / 2 + np.log((a_min * a_max) ** 0.5))
-        
-        # Generate source term f
-        f = self._generate_random_field(self.grid_size, power_decay=1.5)
-        f = (f - f.min()) / (f.max() - f.min() + 1e-8) * 2 - 1  # Normalize to [-1, 1]
-        
-        # Solve Darcy equation: -∇·(a∇u) = f
-        u = self._solve_darcy(a, f)
-        
-        return torch.FloatTensor(a), torch.FloatTensor(u)
+        return self.data[idx]
     
-    def _solve_darcy(self, a, f):
+    def _generate_all_data(self):
+        """Generate all data samples upfront"""
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        
+        self.data = []
+        for idx in range(self.n_samples):
+            sample_seed = self.seed + idx * 1000
+            np.random.seed(sample_seed)
+            torch.manual_seed(sample_seed)
+            
+            # Generate permeability field a(x,y)
+            a_log = self._generate_random_field(self.grid_size, power_decay=2.0)
+            # Map to permeability range
+            a_min, a_max = self.permeability_range
+            a = np.exp(a_log * np.log(a_max / a_min) / 2 + np.log((a_min * a_max) ** 0.5))
+            
+            # Generate source term f
+            f = self._generate_random_field(self.grid_size, power_decay=1.5)
+            f = (f - f.min()) / (f.max() - f.min() + 1e-8) * 2 - 1  # Normalize to [-1, 1]
+            
+            # Solve Darcy equation: -∇·(a∇u) = f
+            u = self._solve_pde(a, f)
+            
+            self.data.append((torch.FloatTensor(a), torch.FloatTensor(u)))
+    
+    def _solve_pde(self, a, f):
         """Solve -∇·(a∇u) = f using iterative method"""
         # Simplified: use Fourier method with constant coefficient approximation
         # More accurate would use finite difference, but this is faster for synthetic data
@@ -145,20 +175,33 @@ class HeatEquationDataset(BasePDEDataset):
         return self.n_samples
     
     def __getitem__(self, idx):
-        # Generate diffusivity field a(x,y)
-        a_log = self._generate_random_field(self.grid_size, power_decay=2.5)
-        a = np.exp(a_log)  # Ensure positive
-        a = a / a.max() * 5.0 + 0.1  # Scale to [0.1, 5.1]
-        
-        # Solve heat equation with boundary conditions
-        # Simplified: use source term approach
-        f = self._generate_random_field(self.grid_size, power_decay=1.0)
-        
-        u = self._solve_heat(a, f)
-        
-        return torch.FloatTensor(a), torch.FloatTensor(u)
+        return self.data[idx]
     
-    def _solve_heat(self, a, f):
+    def _generate_all_data(self):
+        """Generate all data samples upfront"""
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        
+        self.data = []
+        for idx in range(self.n_samples):
+            sample_seed = self.seed + idx * 1000
+            np.random.seed(sample_seed)
+            torch.manual_seed(sample_seed)
+            
+            # Generate diffusivity field a(x,y)
+            a_log = self._generate_random_field(self.grid_size, power_decay=2.5)
+            a = np.exp(a_log)  # Ensure positive
+            a = a / a.max() * 5.0 + 0.1  # Scale to [0.1, 5.1]
+            
+            # Solve heat equation with boundary conditions
+            # Simplified: use source term approach
+            f = self._generate_random_field(self.grid_size, power_decay=1.0)
+            
+            u = self._solve_pde(a, f)
+            
+            self.data.append((torch.FloatTensor(a), torch.FloatTensor(u)))
+    
+    def _solve_pde(self, a, f):
         """Solve steady-state heat equation with source"""
         # Simplified Fourier-based solution
         a_fft = np.fft.fft2(a)
@@ -194,20 +237,33 @@ class WaveEquationDataset(BasePDEDataset):
         return self.n_samples
     
     def __getitem__(self, idx):
-        # Generate wave speed field c(x,y)
-        c = self._generate_random_field(self.grid_size, power_decay=2.0)
-        c = np.exp(c)  # Ensure positive
-        c = c / c.max() * 3.0 + 0.5  # Scale to [0.5, 3.5]
-        
-        # Generate source
-        f = self._generate_random_field(self.grid_size, power_decay=1.5)
-        
-        # Solve wave equation (Helmholtz equation)
-        u = self._solve_wave(c, f)
-        
-        return torch.FloatTensor(c), torch.FloatTensor(u)
+        return self.data[idx]
     
-    def _solve_wave(self, c, f):
+    def _generate_all_data(self):
+        """Generate all data samples upfront"""
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        
+        self.data = []
+        for idx in range(self.n_samples):
+            sample_seed = self.seed + idx * 1000
+            np.random.seed(sample_seed)
+            torch.manual_seed(sample_seed)
+            
+            # Generate wave speed field c(x,y)
+            c = self._generate_random_field(self.grid_size, power_decay=2.0)
+            c = np.exp(c)  # Ensure positive
+            c = c / c.max() * 3.0 + 0.5  # Scale to [0.5, 3.5]
+            
+            # Generate source
+            f = self._generate_random_field(self.grid_size, power_decay=1.5)
+            
+            # Solve wave equation (Helmholtz equation)
+            u = self._solve_pde(c, f)
+            
+            self.data.append((torch.FloatTensor(c), torch.FloatTensor(u)))
+    
+    def _solve_pde(self, c, f):
         """Solve Helmholtz equation: -∇²u - (ω/c)²u = f"""
         omega = 2 * np.pi * self.frequency
         c_avg = c.mean()
