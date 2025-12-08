@@ -134,7 +134,17 @@ def main():
             try:
                 l_base, l_ca, m_time = run_paired_trial(dataset, seed, args)
                 
-                improvement = (l_base - l_ca) / l_base * 100
+                # Calculate improvement percentage, handling zero baseline loss
+                # Use a small threshold to avoid numerical issues with near-zero losses
+                if l_base < 1e-10:  # Avoid division by zero or near-zero
+                    if l_ca < 1e-10:
+                        improvement = 0.0  # Both are essentially zero (perfect predictions)
+                    else:
+                        # Baseline is perfect but CA-FNO is not - improvement undefined
+                        # Use NaN to indicate undefined case (pandas will handle this in stats)
+                        improvement = float('nan')
+                else:
+                    improvement = (l_base - l_ca) / l_base * 100
                 
                 results.append({
                     "Dataset": dataset,
@@ -148,7 +158,9 @@ def main():
                 base_losses.append(l_base)
                 ca_losses.append(l_ca)
                 
-                pbar.set_description(f"Base: {l_base:.4f} | CA: {l_ca:.4f} | Imp: {improvement:+.2f}%")
+                # Format improvement for display (handle NaN)
+                imp_str = f"{improvement:+.2f}%" if not np.isnan(improvement) else "N/A"
+                pbar.set_description(f"Base: {l_base:.4f} | CA: {l_ca:.4f} | Imp: {imp_str}")
             except Exception as e:
                 print(f"Trial {i} failed: {e}")
 

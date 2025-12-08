@@ -22,8 +22,7 @@ def compute_adaptive_mask(
     """
     device = u_batch.device
     
-    # Ensure inputs are 4D: (Batch, Channels, Height, Width)
-    # If inputs are (Batch, H, W), unsqueeze channel dim.
+
     if a_batch.dim() == 3:
         a_batch_in = a_batch.unsqueeze(1)
     else:
@@ -43,10 +42,6 @@ def compute_adaptive_mask(
     m2_eff = min(modes2, W_fft)
 
     def compute_metrics(i_start: int, i_end: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Computes both Energy and Condition-Aware Score for a block of modes.
-        Returns: (scores, energies)
-        """
         m1 = max(i_end - i_start, 0)
         scores = torch.zeros((m1, modes2), device=device)
         energies = torch.zeros((m1, modes2), device=device)
@@ -54,13 +49,10 @@ def compute_adaptive_mask(
         for i_abs in range(i_start, i_end):
             i_rel = i_abs - i_start
             for j in range(m2_eff):
-                # Extract input (X) and output (Y) vectors for this mode across batch
-                # X_k shape: (Batch, In_Channels)
-                # Y_k shape: (Batch, Out_Channels)
+
                 X_k = a_fft[:, :, i_abs, j]
                 Y_k = u_fft[:, :, i_abs, j]
                 
-                # 1. Compute Energy (Squared Frobenius Norm of Output)
                 energy = torch.sum(torch.abs(Y_k) ** 2).real
                 energies[i_rel, j] = energy
                 
