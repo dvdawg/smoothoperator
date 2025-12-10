@@ -31,7 +31,7 @@ N_TRAIN="${6:-800}"
 N_TEST="${7:-200}"
 N_EPOCHS="${8:-50}"
 LR="${9:-0.001}"
-SEED="${10:-42}"
+SEED="${10:-49}"
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Condition-Aware FNO Test Suite Runner${NC}"
