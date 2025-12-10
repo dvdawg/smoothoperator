@@ -161,9 +161,13 @@ class ExperimentRunner:
         
         # Ridge regression initialization
         print("Computing Ridge Regression initialization...")
+        # Model width determines channel dimensions for spectral layers
+        model_width = 64
         init_weights1, init_weights2 = ridge_regression_init(
             a_mask, u_mask, low_mask, high_mask,
-            modes1=self.modes, modes2=self.modes, lambda_reg=1e-4
+            modes1=self.modes, modes2=self.modes,
+            in_channels=model_width, out_channels=model_width,
+            lambda_reg=1e-4
         )
         print(f"Ridge regression weights computed")
         
