@@ -16,7 +16,6 @@ from condition_aware_fno import (
     FNO2d,
     compute_adaptive_mask,
     evaluate,
-    ridge_regression_init,
     train_epoch,
 )
 from datasets import DATASET_REGISTRY, get_dataset
@@ -106,18 +105,8 @@ def run_trial(dataset_name: str, seed: int, args, device: torch.device):
     )
     mask_time = time.time() - mask_start
 
-    # Ridge regression init to match test_suite.py
-    init_low, init_high = ridge_regression_init(
-        a_mask,
-        u_mask,
-        low_mask,
-        high_mask,
-        modes1=args.modes,
-        modes2=args.modes,
-        in_channels=args.width,
-        out_channels=args.width,
-        lambda_reg=args.lambda_reg,
-    )
+    # NOTE: Ridge regression initialization removed to prevent dimension mismatch 
+    # between physical channels (1) and FNO lifted channels (64).
 
     # Standard FNO
     model_std = FNO2d(modes1=args.modes, modes2=args.modes, width=args.width).to(device)
@@ -125,12 +114,11 @@ def run_trial(dataset_name: str, seed: int, args, device: torch.device):
         model_std, train_loader, test_loader, device, u_mean, u_std, args.lr, args.epochs
     )
 
-    # Condition-Aware FNO (with masks + ridge init)
+    # Condition-Aware FNO (with masks only)
     model_ca = ConditionAwareFNO2d(
         low_mask=low_mask,
         high_mask=high_mask,
-        low_weights=init_low,
-        high_weights=init_high,
+        # low_weights/high_weights removed
         modes1=args.modes,
         modes2=args.modes,
         width=args.width,
