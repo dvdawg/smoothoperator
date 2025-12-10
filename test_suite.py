@@ -159,17 +159,9 @@ class ExperimentRunner:
         print(f"Adaptive masks: Low={n_active_low}/{self.modes*self.modes}, "
               f"High={n_active_high}/{self.modes*self.modes} modes selected")
         
-        # Ridge regression initialization
-        print("Computing Ridge Regression initialization...")
-        # Model width determines channel dimensions for spectral layers
-        model_width = 64
-        init_weights1, init_weights2 = ridge_regression_init(
-            a_mask, u_mask, low_mask, high_mask,
-            modes1=self.modes, modes2=self.modes,
-            in_channels=model_width, out_channels=model_width,
-            lambda_reg=1e-4
-        )
-        print(f"Ridge regression weights computed")
+        # Note: We compute the mask using physical variables, but we do NOT use 
+        # the ridge regression weights for initialization here because the FNO 
+        # operates on lifted channels (64), not physical channels (1).
         
         # Train Standard FNO
         print("\n" + "="*60)
@@ -195,9 +187,7 @@ class ExperimentRunner:
             u_mean=u_mean,
             u_std=u_std,
             low_mask=low_mask,
-            high_mask=high_mask,
-            init_weights1=init_weights1,
-            init_weights2=init_weights2
+            high_mask=high_mask
         )
         self.results['condition_aware_fno'] = adaptive_results
         
@@ -229,13 +219,17 @@ class ExperimentRunner:
         if model_type == 'standard':
             model = FNO2d(modes1=self.modes, modes2=self.modes, width=64).to(self.device)
         else:
-            # FIX: Pass the computed weights directly to the constructor
+            # FIX: Removed explicit weight passing (init_weights1/2).
+            # The model will use random initialization for the 64-channel lifted space,
+            # but constrained by the passed masks.
             model = ConditionAwareFNO2d(
-                low_mask=low_mask, high_mask=high_mask,
-                low_weights=init_weights1, high_weights=init_weights2,
-                modes1=self.modes, modes2=self.modes, width=64
+                low_mask=low_mask, 
+                high_mask=high_mask,
+                modes1=self.modes, 
+                modes2=self.modes, 
+                width=64
             ).to(self.device)
-            print("Model initialized with Ridge Regression weights in first layer.")
+            print("Model initialized with Condition-Aware Spectral Mask.")
         
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         criterion = nn.MSELoss()
