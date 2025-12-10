@@ -3,9 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 
-################################################################
-# 1. Adaptive Spectral Truncation & Initialization Utilities
-################################################################
 
 def compute_adaptive_mask(
     a_batch: torch.Tensor,
