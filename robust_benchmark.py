@@ -164,7 +164,7 @@ def main():
         choices=list(DATASET_REGISTRY.keys()),
         help="Datasets to evaluate",
     )
-    parser.add_argument("--trials", type=int, default=5, help="Number of seeds per dataset")
+    parser.add_argument("--trials", type=int, default=20, help="Number of seeds per dataset")
     parser.add_argument("--epochs", type=int, default=50, help="Training epochs per model")
     parser.add_argument("--grid_size", type=int, default=64)
     parser.add_argument("--n_train", type=int, default=800)
