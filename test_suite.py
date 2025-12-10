@@ -229,20 +229,13 @@ class ExperimentRunner:
         if model_type == 'standard':
             model = FNO2d(modes1=self.modes, modes2=self.modes, width=64).to(self.device)
         else:
+            # FIX: Pass the computed weights directly to the constructor
             model = ConditionAwareFNO2d(
                 low_mask=low_mask, high_mask=high_mask,
+                low_weights=init_weights1, high_weights=init_weights2,
                 modes1=self.modes, modes2=self.modes, width=64
             ).to(self.device)
-            
-            # Initialize with ridge regression
-            if init_weights1 is not None and init_weights2 is not None:
-                with torch.no_grad():
-                    scale_factor = 1.0 / np.sqrt(model.conv0.in_channels * model.conv0.out_channels)
-                    for i in range(model.conv0.in_channels):
-                        for o in range(model.conv0.out_channels):
-                            model.conv0.weights1.data[i, o] = init_weights1 * scale_factor
-                            model.conv0.weights2.data[i, o] = init_weights2 * scale_factor
-                print("First spectral layer initialized with Ridge Regression weights")
+            print("Model initialized with Ridge Regression weights in first layer.")
         
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         criterion = nn.MSELoss()
@@ -446,4 +439,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
