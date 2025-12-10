@@ -370,8 +370,7 @@ class ConditionAwareFNO2d(nn.Module):
         self,
         low_mask: torch.Tensor,
         high_mask: torch.Tensor,
-        low_weights: torch.Tensor,
-        high_weights: torch.Tensor,
+        # REMOVED: low_weights, high_weights (cannot use 1x1 weights for 64x64 layer)
         modes1: int = 12,
         modes2: int = 12,
         width: int = 64,
@@ -383,14 +382,14 @@ class ConditionAwareFNO2d(nn.Module):
 
         self.fc0 = nn.Linear(1, width)
 
-        # The first layer is the Condition-Aware layer
-        # It takes the masks and the Ridge Regression initialized weights
+        # Pass ONLY the masks. Let the layer initialize weights randomly 
+        # with the correct (width, width) shape.
         self.conv0 = ConditionAwareSpectralConv2d(
             width, width, 
             low_mask, high_mask, 
             modes1, modes2,
-            init_weights1=low_weights,
-            init_weights2=high_weights
+            init_weights1=None, # Important: Let it default to random init
+            init_weights2=None
         )
         
         # Subsequent layers are standard FNO layers
