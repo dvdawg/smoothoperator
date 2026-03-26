@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Quick test script - runs a fast test with minimal samples
-# Usage: ./quick_test.sh [dataset_name]
-
 DATASET="${1:-poisson}"
 
 echo "Running quick test on $DATASET dataset..."

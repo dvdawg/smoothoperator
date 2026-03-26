@@ -61,6 +61,8 @@ checkpoints/
 runs/
 wandb/
 tensorboard/
+archive/
+temp/
 
 # Data
 data/

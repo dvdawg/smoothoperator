@@ -1,11 +1,3 @@
-"""
-Test Suite for Condition-Aware FNO
-
-Runs experiments on multiple datasets and compares:
-- Standard FNO
-- Condition-Aware FNO with adaptive spectral truncation
-"""
-
 import torch
 import torch.nn as nn
 import numpy as np
@@ -18,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import argparse
 
-# Import from main module
+                         
 from condition_aware_fno import (
     FNO2d, ConditionAwareFNO2d,
     compute_adaptive_mask, ridge_regression_init,
@@ -26,9 +18,7 @@ from condition_aware_fno import (
 )
 from datasets import get_dataset, DATASET_REGISTRY
 
-
 class ExperimentRunner:
-    """Runs experiments on different datasets"""
     
     def __init__(
         self,
@@ -56,23 +46,23 @@ class ExperimentRunner:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
-        # Set device
+                    
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
         
-        # Set random seeds for reproducibility
+                                              
         torch.manual_seed(seed)
         np.random.seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-            # Enable deterministic CUDA operations (may be slower)
+                                                                  
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
         
-        # Results storage
+                         
         self.results = {
             'dataset': dataset_name,
             'config': {
@@ -90,14 +80,13 @@ class ExperimentRunner:
         }
     
     def run_experiment(self):
-        """Run the full experiment"""
         print("="*80)
         print(f"EXPERIMENT: {self.dataset_name.upper()} Dataset")
         print("="*80)
         print(f"Using device: {self.device}")
         print()
         
-        # Create datasets
+                         
         print("Generating synthetic data...")
         train_dataset = get_dataset(
             self.dataset_name,
@@ -109,10 +98,10 @@ class ExperimentRunner:
             self.dataset_name,
             n_samples=self.n_test,
             grid_size=self.grid_size,
-            seed=self.seed + 1000  # Different seed for test set
+            seed=self.seed + 1000                               
         )
         
-        # Create DataLoaders with deterministic shuffling
+                                                         
         generator = torch.Generator()
         generator.manual_seed(self.seed)
         train_loader = DataLoader(
@@ -123,13 +112,13 @@ class ExperimentRunner:
         )
         test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
         
-        # Compute normalization statistics
-        # Collect data in deterministic order (no shuffling for stats)
+                                          
+                                                                      
         print("Computing normalization statistics and adaptive spectral mask...")
         a_batch_list = []
         u_batch_list = []
         
-        # Collect all data deterministically (without shuffling for statistics)
+                                                                               
         stats_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=False)
         for a, u in stats_loader:
             a_batch_list.append(a)
@@ -145,8 +134,8 @@ class ExperimentRunner:
         
         u_all_normalized = (u_all - u_mean) / (u_std + 1e-8)
         
-        # Compute adaptive mask on fixed subset (first n_samples_for_mask samples)
-        # This ensures the same samples are used for mask computation each time
+                                                                                  
+                                                                               
         n_samples_for_mask = min(200, len(a_all))
         a_mask = a_all[:n_samples_for_mask]
         u_mask = u_all_normalized[:n_samples_for_mask]
@@ -159,11 +148,11 @@ class ExperimentRunner:
         print(f"Adaptive masks: Low={n_active_low}/{self.modes*self.modes}, "
               f"High={n_active_high}/{self.modes*self.modes} modes selected")
         
-        # Note: We compute the mask using physical variables, but we do NOT use 
-        # the ridge regression weights for initialization here because the FNO 
-        # operates on lifted channels (64), not physical channels (1).
+                                                                                
+                                                                               
+                                                                      
         
-        # Train Standard FNO
+                            
         print("\n" + "="*60)
         print("Training Standard FNO (Model A)")
         print("="*60)
@@ -176,7 +165,7 @@ class ExperimentRunner:
         )
         self.results['standard_fno'] = standard_results
         
-        # Train Condition-Aware FNO
+                                   
         print("\n" + "="*60)
         print("Training Condition-Aware FNO (Model B)")
         print("="*60)
@@ -191,13 +180,13 @@ class ExperimentRunner:
         )
         self.results['condition_aware_fno'] = adaptive_results
         
-        # Print summary
+                       
         self._print_summary()
         
-        # Save results
+                      
         self._save_results()
         
-        # Plot results
+                      
         self._plot_results()
         
         return self.results
@@ -214,14 +203,13 @@ class ExperimentRunner:
         init_weights1: torch.Tensor = None,
         init_weights2: torch.Tensor = None
     ) -> Dict:
-        """Train a model and return results"""
-        # Create model
+                      
         if model_type == 'standard':
             model = FNO2d(modes1=self.modes, modes2=self.modes, width=64).to(self.device)
         else:
-            # FIX: Removed explicit weight passing (init_weights1/2).
-            # The model will use random initialization for the 64-channel lifted space,
-            # but constrained by the passed masks.
+                                                                     
+                                                                                       
+                                                  
             model = ConditionAwareFNO2d(
                 low_mask=low_mask, 
                 high_mask=high_mask,
@@ -269,7 +257,6 @@ class ExperimentRunner:
         }
     
     def _print_summary(self):
-        """Print experiment summary"""
         print("\n" + "="*80)
         print("RESULTS SUMMARY")
         print("="*80)
@@ -290,8 +277,7 @@ class ExperimentRunner:
         print()
     
     def _save_results(self):
-        """Save results to JSON file"""
-        # Convert tensors to lists for JSON serialization
+                                                         
         results_copy = {}
         for key, value in self.results.items():
             if key in ['standard_fno', 'condition_aware_fno']:
@@ -310,10 +296,9 @@ class ExperimentRunner:
         print(f"Results saved to {filename}")
     
     def _plot_results(self):
-        """Plot and save convergence curves"""
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
-        # Plot 1: Full convergence
+                                  
         ax = axes[0]
         std_train = self.results['standard_fno']['train_losses']
         std_test = self.results['standard_fno']['test_losses']
@@ -331,7 +316,7 @@ class ExperimentRunner:
         ax.set_yscale('log')
         ax.grid(True, alpha=0.3)
         
-        # Plot 2: Test loss comparison
+                                      
         ax = axes[1]
         ax.plot(std_test, label='Standard FNO', linewidth=2)
         ax.plot(adapt_test, label='Condition-Aware FNO', linewidth=2)
@@ -348,13 +333,11 @@ class ExperimentRunner:
         print(f"Plot saved to {filename}")
         plt.close()
 
-
 def run_all_datasets(
     datasets: List[str] = None,
     output_dir: str = "results",
     **experiment_kwargs
 ):
-    """Run experiments on multiple datasets"""
     if datasets is None:
         datasets = list(DATASET_REGISTRY.keys())
     
@@ -375,7 +358,7 @@ def run_all_datasets(
         
         print(f"\nCompleted {dataset_name} experiment\n")
     
-    # Print overall summary
+                           
     print("\n" + "="*80)
     print("OVERALL SUMMARY")
     print("="*80)
@@ -388,9 +371,7 @@ def run_all_datasets(
     
     return all_results
 
-
 def main():
-    """Main entry point"""
     parser = argparse.ArgumentParser(description='Test Condition-Aware FNO on different datasets')
     parser.add_argument('--dataset', type=str, default=None,
                        choices=list(DATASET_REGISTRY.keys()) + ['all'],
@@ -419,17 +400,16 @@ def main():
     }
     
     if args.dataset is None or args.dataset == 'all':
-        # Run all datasets
+                          
         run_all_datasets(output_dir=args.output_dir, **experiment_kwargs)
     else:
-        # Run single dataset
+                            
         runner = ExperimentRunner(
             dataset_name=args.dataset,
             output_dir=args.output_dir,
             **experiment_kwargs
         )
         runner.run_experiment()
-
 
 if __name__ == "__main__":
     main()
