@@ -17,7 +17,7 @@ from condition_aware_fno import (
     evaluate,
     train_epoch,
 )
-from datasets import DATASET_REGISTRY, get_dataset
+from datasets import DATASET_REGISTRY, dataset_in_channels, get_dataset
 from extensions import (
     AnisotropicCAFNO2d,
     DynamicCAFNO2d,
@@ -88,6 +88,7 @@ def _train_standard(model, train_loader, test_loader, device,
 def run_trial(dataset_name: str, seed: int, args,
               device: torch.device) -> dict:
     set_seeds(seed)
+    in_ch = dataset_in_channels(dataset_name)
 
                                                                               
     train_loader, test_loader, stats_loader = _build_loaders(
@@ -99,10 +100,11 @@ def run_trial(dataset_name: str, seed: int, args,
     u_std = u_all.std().item()
     u_norm = (u_all - u_mean) / (u_std + 1e-8)
 
-                                 
+    # spectral pre-analysis (SVD / ridge) runs on CPU: complex linalg is not
+    # supported on all accelerators and this is a one-off pre-computation.
     n_mask = min(200, len(a_all))
-    a_mask = a_all[:n_mask]
-    u_mask = u_norm[:n_mask]                          
+    a_mask = a_all[:n_mask].cpu()
+    u_mask = u_norm[:n_mask].cpu()
     low_mask = high_mask = None
     low_lam = high_lam = None
     full_low_mask = full_high_mask = None
@@ -128,7 +130,7 @@ def run_trial(dataset_name: str, seed: int, args,
         low_lam, high_lam, low_mask_ll, high_mask_ll = compute_learnable_lambda(
             a_tr, u_tr, a_val, u_val,
             modes1=args.modes, modes2=args.modes,
-            n_iters=args.bilevel_iters,
+            n_iters=args.bilevel_iters, outer_lr=args.bilevel_lr,
             energy_fraction=args.energy_fraction,
         )
         ll_precomp_time = time.time() - t_ll
@@ -159,7 +161,7 @@ def run_trial(dataset_name: str, seed: int, args,
                                                                                
     if "std" in args.models:
         set_seeds(seed)
-        model = FNO2d(modes1=args.modes, modes2=args.modes,
+        model = FNO2d(in_channels=in_ch, modes1=args.modes, modes2=args.modes,
                       width=args.width).to(device)
         res = _train_standard(model, train_loader, test_loader,
                               device, u_mean, u_std, args)
@@ -170,7 +172,7 @@ def run_trial(dataset_name: str, seed: int, args,
     if "ca" in args.models:
         set_seeds(seed)
         model = ConditionAwareFNO2d(
-            low_mask=low_mask, high_mask=high_mask,
+            low_mask=low_mask, high_mask=high_mask, in_channels=in_ch,
             modes1=args.modes, modes2=args.modes, width=args.width,
         ).to(device)
         res = _train_standard(model, train_loader, test_loader,
@@ -183,6 +185,7 @@ def run_trial(dataset_name: str, seed: int, args,
         set_seeds(seed)
         model = LearnableLambdaCAFNO2d(
             low_mask=low_mask_ll, high_mask=high_mask_ll,
+            low_lam=low_lam, high_lam=high_lam, in_channels=in_ch,
             modes1=args.modes, modes2=args.modes, width=args.width,
         ).to(device)
         res = _train_standard(model, train_loader, test_loader,
@@ -194,7 +197,7 @@ def run_trial(dataset_name: str, seed: int, args,
     if "per_layer" in args.models:
         set_seeds(seed)
         model = PerLayerCAFNO2d(
-            low_mask=low_mask, high_mask=high_mask,
+            low_mask=low_mask, high_mask=high_mask, in_channels=in_ch,
             modes1=args.modes, modes2=args.modes, width=args.width,
         ).to(device)
 
@@ -223,7 +226,7 @@ def run_trial(dataset_name: str, seed: int, args,
     if "dynamic" in args.models:
         set_seeds(seed)
         model = DynamicCAFNO2d(
-            low_mask=low_mask, high_mask=high_mask,
+            low_mask=low_mask, high_mask=high_mask, in_channels=in_ch,
             modes1=args.modes, modes2=args.modes, width=args.width,
         ).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -245,7 +248,7 @@ def run_trial(dataset_name: str, seed: int, args,
         set_seeds(seed)
         model = AnisotropicCAFNO2d(
             low_mask=full_low_mask, high_mask=full_high_mask,
-            width=args.width,
+            in_channels=in_ch, width=args.width,
         ).to(device)
         res = _train_standard(model, train_loader, test_loader,
                               device, u_mean, u_std, args)
@@ -392,9 +395,9 @@ def main() -> None:
                                            
     parser.add_argument("--energy_fraction", type=float, default=0.95,
                         help="η for energy criterion (all extensions)")
-    parser.add_argument("--bilevel_iters", type=int, default=60,
+    parser.add_argument("--bilevel_iters", type=int, default=80,
                         help="Outer iterations for learnable-lambda (Ext 1)")
-    parser.add_argument("--bilevel_lr", type=float, default=0.05,
+    parser.add_argument("--bilevel_lr", type=float, default=0.3,
                         help="Outer step size for learnable-lambda (Ext 1)")
     parser.add_argument("--bootstrap_batches", type=int, default=20,
                         help="Mini-batches used for per-layer bootstrap (Ext 2)")
@@ -402,13 +405,23 @@ def main() -> None:
                         help="Number of mask re-evaluations for dynamic (Ext 3)")
                
     parser.add_argument("--output_dir", type=str, default="benchmark_results")
+    parser.add_argument("--device", type=str, default="auto",
+                        choices=["auto", "cpu", "cuda", "mps"],
+                        help="Compute device (auto picks cuda>mps>cpu)")
 
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device != "auto":
+        device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Device        : {device}")
     print(f"Datasets      : {args.datasets}")
     print(f"Models        : {args.models}")

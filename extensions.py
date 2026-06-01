@@ -14,55 +14,31 @@ from condition_aware_fno import (
     compute_adaptive_mask,
     evaluate,
     train_epoch,
+    _energy_cond,
+    _select_by_energy_budget,
+    _to_channels_first,
 )
+
+# backwards-compatible local alias
+_energy_and_cond = _energy_cond
+
 
 def _fft_data_matrices(
     a_batch: torch.Tensor,
     u_batch: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if a_batch.dim() == 3:
-        a_batch = a_batch.unsqueeze(1)
-    if u_batch.dim() == 3:
-        u_batch = u_batch.unsqueeze(1)
-    return torch.fft.rfft2(a_batch), torch.fft.rfft2(u_batch)
+    """rfft2 of channels-last (or channels-first) input/target fields."""
+    return torch.fft.rfft2(_to_channels_first(a_batch)), torch.fft.rfft2(_to_channels_first(u_batch))
 
-def _energy_and_cond(
-    X_k: torch.Tensor,
-    Y_k: torch.Tensor,
-) -> Tuple[float, float]:
-
-    energy = torch.sum(torch.abs(Y_k) ** 2).real.item()
-    try:
-        s = torch.linalg.svdvals(X_k)
-        cond = (s[0] / s[-1]).item() if s[-1].item() > 1e-9 else 1e9
-    except Exception:
-        cond = 1e9
-    return energy, cond
 
 def _build_mask_from_scores(
     scores: torch.Tensor,
     energies: torch.Tensor,
     energy_fraction: float,
-    device: torch.device,
+    device: torch.device = None,
 ) -> torch.Tensor:
-    flat_scores = scores.reshape(-1)
-    flat_energies = energies.reshape(-1)
-    total_energy = flat_energies.sum()
-
-    if total_energy <= 0:
-        return torch.ones_like(scores, dtype=torch.bool)
-
-    sorted_scores, sorted_idx = torch.sort(flat_scores, descending=True)
-    sorted_energies = flat_energies[sorted_idx]
-    cumsum = torch.cumsum(sorted_energies, dim=0)
-
-    k = int((cumsum <= energy_fraction * total_energy).sum().item())
-    k = max(k, 1)
-    k = min(k, flat_scores.numel())
-
-    mask_flat = torch.zeros_like(flat_scores, dtype=torch.bool)
-    mask_flat[sorted_idx[:k]] = True
-    return mask_flat.view_as(scores)
+    """Smallest high-utility set whose cumulative energy meets the budget."""
+    return _select_by_energy_budget(scores, energies, energy_fraction)
 
 def compute_learnable_lambda(
     a_train: torch.Tensor,
@@ -101,35 +77,32 @@ def compute_learnable_lambda(
 
                 d_in = X_tr.shape[1]
 
-                                              
-                XHX = X_tr.T.conj() @ X_tr                        
-                B_mat = X_tr.T.conj() @ Y_tr                       
+                XHX = X_tr.T.conj() @ X_tr                       # (d, d)
+                B_mat = X_tr.T.conj() @ Y_tr                     # (d, o)
                 eye = torch.eye(d_in, dtype=XHX.dtype, device=device)
 
-                                                                  
-                log_lam = torch.tensor(0.0, dtype=torch.float32,
-                                       device=device, requires_grad=True)
-
+                # Bilevel descent on alpha = log(lambda) using the *analytic*
+                # gradient of the closed-form ridge solution (paper Eq. for
+                # d L_val / d alpha), avoiding autograd through linalg.solve.
+                #   A = XHX + lam I,  C* = A^{-1} B,
+                #   dC*/dalpha = -lam A^{-1} C*,
+                #   dL/dalpha  = 2 Re < X_val dC*/dalpha , X_val C* - Y_val >.
+                log_lam = 0.0
                 for _ in range(n_iters):
-                    lam = torch.exp(log_lam).to(dtype=XHX.dtype)
+                    lam = torch.exp(torch.tensor(log_lam, dtype=torch.float64)).item()
                     A = XHX + lam * eye
-                                                                      
                     try:
-                        C_H = torch.linalg.solve(A, B_mat)
+                        Ainv = torch.linalg.inv(A)
                     except torch.linalg.LinAlgError:
                         break
+                    C_star = Ainv @ B_mat                        # (d, o)
+                    R = X_val @ C_star - Y_val                   # (Nval, o)
+                    dC = -lam * (Ainv @ C_star)                  # dC*/dalpha
+                    grad = 2.0 * torch.sum((X_val @ dC).conj() * R).real.item()
+                    log_lam -= outer_lr * grad
+                    log_lam = float(max(min(log_lam, 12.0), -12.0))  # clamp
 
-                    val_pred = X_val @ C_H                          
-                    residual = val_pred - Y_val
-                    val_loss = torch.sum(torch.abs(residual) ** 2).real
-
-                    (grad,) = torch.autograd.grad(val_loss, log_lam)
-                    with torch.no_grad():
-                        log_lam = log_lam - outer_lr * grad
-                    log_lam = log_lam.detach().requires_grad_(True)
-
-                lam_final = torch.exp(log_lam.detach()).item()
-                lambdas[i_rel, j] = lam_final
+                lambdas[i_rel, j] = float(torch.exp(torch.tensor(log_lam)).item())
 
                                                   
                 energy, cond = _energy_and_cond(X_tr, Y_tr)
@@ -151,53 +124,84 @@ def compute_learnable_lambda(
 
     return low_lam, high_lam, low_mask, high_mask
 
+def _normalized_lambda(low_lam, high_lam, base_scale):
+    """Map raw per-mode bilevel lambdas to gentle per-mode weight-decay coefficients.
+
+    The bilevel lambdas live on the physical-input ridge problem and are only
+    meaningful *relatively* (larger for ill-conditioned modes).  We normalise to
+    unit mean and scale by ``base_scale`` so the spectral weight penalty stays a
+    mild, mode-adaptive prior rather than dominating the data term.
+    """
+    out = []
+    for lam in (low_lam, high_lam):
+        m = lam.mean()
+        norm = lam / (m + 1e-12) if m > 0 else torch.ones_like(lam)
+        out.append(base_scale * norm)
+    return out
+
+
 class LearnableLambdaCAFNO2d(nn.Module):
+    """CA-FNO whose spectral weights carry a learned, mode-adaptive Tikhonov prior.
+
+    The mask is applied at every layer (like ``ConditionAwareFNO2d``) and each
+    layer's spectral weights are penalised by ``sum_k lambda_k ||W(k)||^2`` with
+    the per-mode ``lambda_k`` obtained from the bilevel pre-analysis.  This is
+    the variant for which the Sec. 7 conditioning argument applies to the
+    *trained* weights.
+    """
 
     def __init__(
         self,
         low_mask: torch.Tensor,
         high_mask: torch.Tensor,
+        low_lam: torch.Tensor = None,
+        high_lam: torch.Tensor = None,
+        in_channels: int = 1,
         modes1: int = 12,
         modes2: int = 12,
         width: int = 64,
+        reg_scale: float = 1e-3,
     ):
         super().__init__()
-        self.modes1 = modes1
-        self.modes2 = modes2
-        self.width = width
+        self.modes1, self.modes2, self.width = modes1, modes2, width
+        self.fc0 = nn.Linear(in_channels, width)
 
-        self.fc0 = nn.Linear(1, width)
+        if low_lam is None:
+            low_lam = torch.ones(modes1, modes2)
+        if high_lam is None:
+            high_lam = torch.ones(modes1, modes2)
+        ll, hl = _normalized_lambda(low_lam, high_lam, reg_scale)
 
-        self.conv0 = ConditionAwareSpectralConv2d(
-            width, width, low_mask, high_mask, modes1, modes2
-        )
-        self.conv1 = SpectralConv2d(width, width, modes1, modes2)
-        self.conv2 = SpectralConv2d(width, width, modes1, modes2)
-        self.conv3 = SpectralConv2d(width, width, modes1, modes2)
+        def _mk():
+            return ConditionAwareSpectralConv2d(
+                width, width, low_mask, high_mask, modes1, modes2, ll, hl
+            )
 
+        self.conv0, self.conv1, self.conv2, self.conv3 = _mk(), _mk(), _mk(), _mk()
         self.w0 = nn.Conv2d(width, width, 1)
         self.w1 = nn.Conv2d(width, width, 1)
         self.w2 = nn.Conv2d(width, width, 1)
         self.w3 = nn.Conv2d(width, width, 1)
-
         self.fc1 = nn.Linear(width, 128)
         self.fc2 = nn.Linear(128, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(-1)
-        x = self.fc0(x)
-        x = x.permute(0, 3, 1, 2)
-
+        x = self.fc0(x).permute(0, 3, 1, 2)
         x = F.gelu(self.conv0(x) + self.w0(x))
         x = F.gelu(self.conv1(x) + self.w1(x))
         x = F.gelu(self.conv2(x) + self.w2(x))
         x = self.conv3(x) + self.w3(x)
-
         x = x.permute(0, 2, 3, 1)
         x = F.gelu(self.fc1(x))
-        x = self.fc2(x).squeeze(-1)
-        return x                                                     
+        return self.fc2(x).squeeze(-1)
+
+    def spectral_regularization(self) -> torch.Tensor:
+        total = self.conv0.reg_term()
+        for c in (self.conv1, self.conv2, self.conv3):
+            total = total + c.reg_term()
+        return total
 
 class PerLayerCAFNO2d(nn.Module):
 
@@ -207,6 +211,7 @@ class PerLayerCAFNO2d(nn.Module):
         self,
         low_mask: torch.Tensor,
         high_mask: torch.Tensor,
+        in_channels: int = 1,
         modes1: int = 12,
         modes2: int = 12,
         width: int = 64,
@@ -216,10 +221,10 @@ class PerLayerCAFNO2d(nn.Module):
         self.modes2 = modes2
         self.width = width
 
-        self.fc0 = nn.Linear(1, width)
+        self.fc0 = nn.Linear(in_channels, width)
 
-                                                          
-                                                                               
+
+
         self.conv0 = ConditionAwareSpectralConv2d(
             width, width, low_mask, high_mask, modes1, modes2
         )
@@ -388,6 +393,7 @@ class DynamicCAFNO2d(nn.Module):
         self,
         low_mask: torch.Tensor,
         high_mask: torch.Tensor,
+        in_channels: int = 1,
         modes1: int = 12,
         modes2: int = 12,
         width: int = 64,
@@ -397,14 +403,15 @@ class DynamicCAFNO2d(nn.Module):
         self.modes2 = modes2
         self.width = width
 
-        self.fc0 = nn.Linear(1, width)
+        self.fc0 = nn.Linear(in_channels, width)
 
-        self.conv0 = ConditionAwareSpectralConv2d(
-            width, width, low_mask, high_mask, modes1, modes2
-        )
-        self.conv1 = SpectralConv2d(width, width, modes1, modes2)
-        self.conv2 = SpectralConv2d(width, width, modes1, modes2)
-        self.conv3 = SpectralConv2d(width, width, modes1, modes2)
+        def _mk():
+            return ConditionAwareSpectralConv2d(
+                width, width, low_mask, high_mask, modes1, modes2
+            )
+
+        self.conv0, self.conv1, self.conv2, self.conv3 = _mk(), _mk(), _mk(), _mk()
+        self._convs = [self.conv0, self.conv1, self.conv2, self.conv3]
 
         self.w0 = nn.Conv2d(width, width, 1)
         self.w1 = nn.Conv2d(width, width, 1)
@@ -417,18 +424,14 @@ class DynamicCAFNO2d(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(-1)
-        x = self.fc0(x)
-        x = x.permute(0, 3, 1, 2)
-
+        x = self.fc0(x).permute(0, 3, 1, 2)
         x = F.gelu(self.conv0(x) + self.w0(x))
         x = F.gelu(self.conv1(x) + self.w1(x))
         x = F.gelu(self.conv2(x) + self.w2(x))
         x = self.conv3(x) + self.w3(x)
-
         x = x.permute(0, 2, 3, 1)
         x = F.gelu(self.fc1(x))
-        x = self.fc2(x).squeeze(-1)
-        return x
+        return self.fc2(x).squeeze(-1)
 
     @torch.no_grad()
     def update_masks_from_residuals(
@@ -476,9 +479,10 @@ class DynamicCAFNO2d(nn.Module):
         new_low_mask = _build_mask_from_scores(low_s, low_e, energy_fraction, device)
         new_high_mask = _build_mask_from_scores(high_s, high_e, energy_fraction, device)
 
-                                                         
-        self.conv0.low_mask.copy_(new_low_mask)
-        self.conv0.high_mask.copy_(new_high_mask)
+        # update the active mode set at every spectral layer
+        for conv in self._convs:
+            conv.low_mask.copy_(new_low_mask)
+            conv.high_mask.copy_(new_high_mask)
 
         return new_low_mask.sum().item(), new_high_mask.sum().item()
 
@@ -656,6 +660,7 @@ class AnisotropicCAFNO2d(nn.Module):
         self,
         low_mask: torch.Tensor,
         high_mask: torch.Tensor,
+        in_channels: int = 1,
         width: int = 64,
     ):
         super().__init__()
@@ -665,7 +670,7 @@ class AnisotropicCAFNO2d(nn.Module):
         self.half = half
         self.W_fft = W_fft
 
-        self.fc0 = nn.Linear(1, width)
+        self.fc0 = nn.Linear(in_channels, width)
 
         self.conv0 = AnisotropicSpectralConv2d(width, width, low_mask, high_mask)
         self.conv1 = AnisotropicSpectralConv2d(width, width, low_mask, high_mask)
